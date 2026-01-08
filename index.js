@@ -1,5 +1,6 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const http = require('http');
 const url = require('url');
 
@@ -13,6 +14,7 @@ const ALLOWED_ORIGINS = [
 // État de la connexion
 let clientReady = false;
 let currentQR = null;
+let currentQRBase64 = null;
 let client = null;
 let selectedGroupId = null;
 let initializationError = null;
@@ -81,7 +83,8 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/qr' && req.method === 'GET') {
       res.writeHead(200);
       res.end(JSON.stringify({
-        qr: currentQR,
+        qr: currentQRBase64,
+        qrRaw: currentQR,
         connected: clientReady
       }));
       return;
@@ -266,17 +269,31 @@ function initClient() {
       }
     });
 
-    client.on('qr', (qr) => {
+    client.on('qr', async (qr) => {
       currentQR = qr;
       initializationError = null;
+      
+      // Générer le QR code en base64 pour l'API
+      try {
+        currentQRBase64 = await QRCode.toDataURL(qr, { 
+          width: 256,
+          margin: 2,
+          color: { dark: '#000000', light: '#ffffff' }
+        });
+        console.log('✅ QR Code base64 généré');
+      } catch (err) {
+        console.error('Erreur génération QR base64:', err);
+      }
+      
       console.log('\n📱 QR Code reçu! Scannez-le avec WhatsApp:\n');
-      qrcode.generate(qr, { small: true });
+      qrcodeTerminal.generate(qr, { small: true });
       console.log('\n⏳ En attente du scan...\n');
     });
 
     client.on('ready', async () => {
       clientReady = true;
       currentQR = null;
+      currentQRBase64 = null;
       initializationError = null;
       console.log('✅ WhatsApp connecté avec succès!\n');
       
