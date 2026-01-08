@@ -1,9 +1,12 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const http = require('http');
 const url = require('url');
+const fs = require('fs');
 
 const PORT = process.env.PORT || 3001;
+const isDocker = fs.existsSync('/.dockerenv') || process.env.RAILWAY_ENVIRONMENT;
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'https://fitmoi.vercel.app',
@@ -17,6 +20,7 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'fitmoi-webhook-2024';
 // État de la connexion
 let clientReady = false;
 let currentQR = null;
+let currentQRBase64 = null;
 let client = null;
 let selectedGroupId = null;
 let selectedGroupName = null;
@@ -29,35 +33,56 @@ let isProcessingQueue = false;
 function initClient() {
   console.log('🚀 Démarrage du serveur WhatsApp FitMoi...\n');
 
+  const puppeteerConfig = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu'
+    ]
+  };
+  
+  // Utiliser chromium système sur Docker/Railway
+  if (isDocker) {
+    puppeteerConfig.executablePath = '/usr/bin/chromium';
+  }
+
   client = new Client({
     authStrategy: new LocalAuth({
-      dataPath: './whatsapp-session'
+      dataPath: isDocker ? '/tmp/whatsapp-session' : './whatsapp-session'
     }),
-    puppeteer: {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu'
-      ]
-    }
+    puppeteer: puppeteerConfig
   });
 
-  client.on('qr', (qr) => {
+  client.on('qr', async (qr) => {
     currentQR = qr;
+    
+    // Générer le QR code en base64 pour l'API
+    try {
+      currentQRBase64 = await QRCode.toDataURL(qr, { 
+        width: 256,
+        margin: 2,
+        color: { dark: '#000000', light: '#ffffff' }
+      });
+      console.log('✅ QR Code base64 généré');
+    } catch (err) {
+      console.error('Erreur génération QR base64:', err);
+    }
+    
     console.log('\n📱 QR Code reçu! Scannez-le avec WhatsApp:\n');
-    qrcode.generate(qr, { small: true });
+    qrcodeTerminal.generate(qr, { small: true });
     console.log('\n⏳ En attente du scan...\n');
   });
 
   client.on('ready', async () => {
     clientReady = true;
     currentQR = null;
+    currentQRBase64 = null;
     console.log('✅ WhatsApp connecté avec succès!\n');
     
     // Lister les groupes disponibles
@@ -240,6 +265,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify({
         qr: currentQR,
+        qrBase64: currentQRBase64,
         connected: clientReady
       }));
       return;
