@@ -1,6 +1,5 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcodeTerminal = require('qrcode-terminal');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode-terminal');
 const http = require('http');
 const url = require('url');
 
@@ -11,13 +10,173 @@ const ALLOWED_ORIGINS = [
   'https://fitmoi-*.vercel.app'
 ];
 
+// Configuration du webhook (où envoyer les messages pour analyse IA)
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://fitmoi.vercel.app/api/webhook/whatsapp';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'fitmoi-webhook-2024';
+
 // État de la connexion
 let clientReady = false;
 let currentQR = null;
-let currentQRBase64 = null;
 let client = null;
 let selectedGroupId = null;
-let initializationError = null;
+let selectedGroupName = null;
+
+// File d'attente pour les messages à envoyer au webhook
+const messageQueue = [];
+let isProcessingQueue = false;
+
+// Initialiser le client WhatsApp
+function initClient() {
+  console.log('🚀 Démarrage du serveur WhatsApp FitMoi...\n');
+
+  client = new Client({
+    authStrategy: new LocalAuth({
+      dataPath: './whatsapp-session'
+    }),
+    puppeteer: {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu'
+      ]
+    }
+  });
+
+  client.on('qr', (qr) => {
+    currentQR = qr;
+    console.log('\n📱 QR Code reçu! Scannez-le avec WhatsApp:\n');
+    qrcode.generate(qr, { small: true });
+    console.log('\n⏳ En attente du scan...\n');
+  });
+
+  client.on('ready', async () => {
+    clientReady = true;
+    currentQR = null;
+    console.log('✅ WhatsApp connecté avec succès!\n');
+    
+    // Lister les groupes disponibles
+    const chats = await client.getChats();
+    const groups = chats.filter(chat => chat.isGroup);
+    console.log(`📋 ${groups.length} groupes disponibles:\n`);
+    groups.slice(0, 10).forEach((g, i) => {
+      console.log(`  ${i + 1}. ${g.name} (${g.id._serialized})`);
+    });
+    if (groups.length > 10) {
+      console.log(`  ... et ${groups.length - 10} autres groupes`);
+    }
+    
+    console.log('\n👂 En écoute des messages...\n');
+  });
+
+  client.on('authenticated', () => {
+    console.log('🔐 Authentification réussie!\n');
+  });
+
+  client.on('auth_failure', (msg) => {
+    console.error('❌ Échec authentification:', msg);
+    clientReady = false;
+  });
+
+  client.on('disconnected', (reason) => {
+    console.log('📴 WhatsApp déconnecté:', reason);
+    clientReady = false;
+    currentQR = null;
+    // Reconnecter après un délai
+    setTimeout(() => {
+      console.log('🔄 Tentative de reconnexion...');
+      client.initialize();
+    }, 5000);
+  });
+
+  client.on('message', async (msg) => {
+    // Traiter uniquement les messages du groupe sélectionné
+    if (selectedGroupId && msg.from === selectedGroupId) {
+      try {
+        // Récupérer les infos du contact
+        const contact = await msg.getContact();
+        const authorNumber = msg.author ? msg.author.split('@')[0] : msg.from.split('@')[0];
+        
+        console.log(`📩 Message de ${contact.pushname || authorNumber}: "${msg.body.substring(0, 50)}${msg.body.length > 50 ? '...' : ''}"`);
+        
+        // Préparer le message pour le webhook
+        const messageData = {
+          messageId: msg.id._serialized,
+          groupId: selectedGroupId,
+          groupName: selectedGroupName,
+          from: authorNumber,
+          fromName: contact.pushname || contact.name || null,
+          body: msg.body,
+          timestamp: msg.timestamp,
+          hasMedia: msg.hasMedia,
+          mediaUrl: null // TODO: gérer les médias si nécessaire
+        };
+        
+        // Ajouter à la file d'attente
+        messageQueue.push(messageData);
+        processMessageQueue();
+        
+      } catch (err) {
+        console.error('Erreur traitement message:', err.message);
+      }
+    }
+  });
+
+  client.initialize();
+}
+
+/**
+ * Traite la file d'attente des messages et les envoie au webhook
+ */
+async function processMessageQueue() {
+  if (isProcessingQueue || messageQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  
+  while (messageQueue.length > 0) {
+    const message = messageQueue.shift();
+    
+    try {
+      console.log(`🚀 Envoi au webhook: ${message.body.substring(0, 30)}...`);
+      
+      const response = await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${WEBHOOK_SECRET}`
+        },
+        body: JSON.stringify(message)
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`✅ Analyse IA: ${result.analysis?.type || 'traité'} (confiance: ${result.analysis?.confidence || 'N/A'})`);
+      } else {
+        console.error(`❌ Erreur webhook: ${response.status}`);
+        // Remettre en queue si erreur temporaire
+        if (response.status >= 500) {
+          messageQueue.unshift(message);
+          await new Promise(r => setTimeout(r, 5000)); // Attendre 5s avant retry
+        }
+      }
+    } catch (err) {
+      console.error('❌ Erreur envoi webhook:', err.message);
+      // Remettre en queue pour réessayer
+      messageQueue.unshift(message);
+      await new Promise(r => setTimeout(r, 5000));
+    }
+    
+    // Petite pause entre les messages
+    await new Promise(r => setTimeout(r, 100));
+  }
+  
+  isProcessingQueue = false;
+}
 
 // Vérifier si l'origine est autorisée
 function isOriginAllowed(origin) {
@@ -60,8 +219,6 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ 
         status: 'ok', 
         connected: clientReady,
-        hasQR: currentQR !== null,
-        error: initializationError,
         timestamp: new Date().toISOString()
       }));
       return;
@@ -73,8 +230,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({
         connected: clientReady,
         hasQR: currentQR !== null,
-        selectedGroup: selectedGroupId,
-        error: initializationError
+        selectedGroup: selectedGroupId
       }));
       return;
     }
@@ -83,8 +239,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/qr' && req.method === 'GET') {
       res.writeHead(200);
       res.end(JSON.stringify({
-        qr: currentQRBase64,
-        qrRaw: currentQR,
+        qr: currentQR,
         connected: clientReady
       }));
       return;
@@ -98,29 +253,15 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       
-      // Paramètre optionnel pour filtrer par mot-clé
-      const keyword = parsedUrl.query.keyword?.toLowerCase();
-      const limit = parseInt(parsedUrl.query.limit) || 50;
-      
       const chats = await client.getChats();
-      let groups = chats.filter(chat => chat.isGroup);
-      
-      // Filtrer par mot-clé si fourni
-      if (keyword) {
-        groups = groups.filter(g => g.name.toLowerCase().includes(keyword));
-      }
-      
-      // Limiter le nombre de résultats
-      const result = groups.slice(0, limit).map(g => ({
+      const groups = chats.filter(chat => chat.isGroup).map(g => ({
         id: g.id._serialized,
         name: g.name,
         participantsCount: g.participants?.length || 0
       }));
       
-      console.log(`📋 ${result.length} groupes trouvés${keyword ? ` (filtre: "${keyword}")` : ''}`);
-      
       res.writeHead(200);
-      res.end(JSON.stringify(result));
+      res.end(JSON.stringify(groups));
       return;
     }
 
@@ -184,21 +325,19 @@ const server = http.createServer(async (req, res) => {
           const { groupId } = JSON.parse(body);
           selectedGroupId = groupId;
           
-          if (clientReady) {
-            const chat = await client.getChatById(groupId);
-            console.log(`✅ Groupe sélectionné: ${chat.name}`);
-            res.writeHead(200);
-            res.end(JSON.stringify({ 
-              success: true, 
-              groupName: chat.name 
-            }));
-          } else {
-            res.writeHead(200);
-            res.end(JSON.stringify({ 
-              success: true, 
-              groupName: 'WhatsApp non connecté' 
-            }));
-          }
+          const chat = await client.getChatById(groupId);
+          selectedGroupName = chat.name;
+          
+          console.log(`\n✅ Groupe sélectionné: ${chat.name}`);
+          console.log(`📡 Les messages seront envoyés au webhook: ${WEBHOOK_URL}`);
+          console.log(`👂 En écoute des nouveaux messages...\n`);
+          
+          res.writeHead(200);
+          res.end(JSON.stringify({ 
+            success: true, 
+            groupName: chat.name,
+            webhookEnabled: true
+          }));
         } catch (err) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: err.message }));
@@ -252,137 +391,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Initialiser le client WhatsApp
-function initClient() {
-  console.log('🚀 Initialisation du client WhatsApp...\n');
-
-  try {
-    // Déterminer le chemin de Chromium (différent selon l'environnement)
-    const isDocker = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.RAILWAY_ENVIRONMENT;
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
-    
-    if (isDocker) {
-      console.log(`📍 Chromium path: ${executablePath}`);
-    } else {
-      console.log(`📍 Utilisation du Chromium intégré de Puppeteer`);
-    }
-
-    const puppeteerConfig = {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-software-rasterizer'
-      ]
-    };
-    
-    // Ajouter le chemin Chromium seulement en environnement Docker/Railway
-    if (isDocker) {
-      puppeteerConfig.executablePath = executablePath;
-    }
-
-    client = new Client({
-      authStrategy: new LocalAuth({
-        dataPath: isDocker ? '/tmp/whatsapp-session' : './whatsapp-session'
-      }),
-      puppeteer: puppeteerConfig
-    });
-
-    client.on('qr', async (qr) => {
-      currentQR = qr;
-      initializationError = null;
-      
-      // Générer le QR code en base64 pour l'API
-      try {
-        currentQRBase64 = await QRCode.toDataURL(qr, { 
-          width: 256,
-          margin: 2,
-          color: { dark: '#000000', light: '#ffffff' }
-        });
-        console.log('✅ QR Code base64 généré');
-      } catch (err) {
-        console.error('Erreur génération QR base64:', err);
-      }
-      
-      console.log('\n📱 QR Code reçu! Scannez-le avec WhatsApp:\n');
-      qrcodeTerminal.generate(qr, { small: true });
-      console.log('\n⏳ En attente du scan...\n');
-    });
-
-    client.on('ready', async () => {
-      clientReady = true;
-      currentQR = null;
-      currentQRBase64 = null;
-      initializationError = null;
-      console.log('✅ WhatsApp connecté avec succès!\n');
-      
-      try {
-        const chats = await client.getChats();
-        const groups = chats.filter(chat => chat.isGroup);
-        console.log(`📋 ${groups.length} groupes disponibles:\n`);
-        groups.slice(0, 10).forEach((g, i) => {
-          console.log(`  ${i + 1}. ${g.name} (${g.id._serialized})`);
-        });
-        if (groups.length > 10) {
-          console.log(`  ... et ${groups.length - 10} autres groupes`);
-        }
-      } catch (err) {
-        console.log('Erreur listing groupes:', err.message);
-      }
-      
-      console.log('\n👂 En écoute des messages...\n');
-    });
-
-    client.on('authenticated', () => {
-      console.log('🔐 Authentification réussie!\n');
-    });
-
-    client.on('auth_failure', (msg) => {
-      console.error('❌ Échec authentification:', msg);
-      clientReady = false;
-      initializationError = 'Échec authentification: ' + msg;
-    });
-
-    client.on('disconnected', (reason) => {
-      console.log('📴 WhatsApp déconnecté:', reason);
-      clientReady = false;
-      currentQR = null;
-      // Reconnecter après un délai
-      setTimeout(() => {
-        console.log('🔄 Tentative de reconnexion...');
-        client.initialize().catch(err => {
-          console.error('Erreur reconnexion:', err.message);
-        });
-      }, 10000);
-    });
-
-    client.on('message', async (msg) => {
-      if (selectedGroupId && msg.from === selectedGroupId) {
-        console.log(`📩 Message de ${msg.from}: ${msg.body.substring(0, 50)}...`);
-      }
-    });
-
-    console.log('🔄 Démarrage de WhatsApp Web...');
-    client.initialize().catch(err => {
-      console.error('❌ Erreur initialisation WhatsApp:', err.message);
-      initializationError = err.message;
-    });
-
-  } catch (err) {
-    console.error('❌ Erreur création client:', err.message);
-    initializationError = err.message;
-  }
-}
-
-// Démarrer le serveur HTTP d'abord
+// Démarrer le serveur
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n📡 Serveur HTTP démarré sur le port ${PORT}`);
+  console.log(`\n📡 API WhatsApp disponible sur le port ${PORT}`);
   console.log(`   - GET  /health        - Health check`);
   console.log(`   - GET  /status        - État de la connexion`);
   console.log(`   - GET  /qr            - QR code pour connexion`);
@@ -391,8 +402,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`   - POST /select-group  - Sélectionner un groupe`);
   console.log(`   - POST /send-message  - Envoyer un message\n`);
   
-  // Initialiser WhatsApp après un court délai
-  setTimeout(() => {
-    initClient();
-  }, 2000);
+  initClient();
 });
