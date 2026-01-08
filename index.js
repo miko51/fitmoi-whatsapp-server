@@ -98,15 +98,29 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       
+      // Paramètre optionnel pour filtrer par mot-clé
+      const keyword = parsedUrl.query.keyword?.toLowerCase();
+      const limit = parseInt(parsedUrl.query.limit) || 50;
+      
       const chats = await client.getChats();
-      const groups = chats.filter(chat => chat.isGroup).map(g => ({
+      let groups = chats.filter(chat => chat.isGroup);
+      
+      // Filtrer par mot-clé si fourni
+      if (keyword) {
+        groups = groups.filter(g => g.name.toLowerCase().includes(keyword));
+      }
+      
+      // Limiter le nombre de résultats
+      const result = groups.slice(0, limit).map(g => ({
         id: g.id._serialized,
         name: g.name,
         participantsCount: g.participants?.length || 0
       }));
       
+      console.log(`📋 ${result.length} groupes trouvés${keyword ? ` (filtre: "${keyword}")` : ''}`);
+      
       res.writeHead(200);
-      res.end(JSON.stringify(groups));
+      res.end(JSON.stringify(result));
       return;
     }
 
