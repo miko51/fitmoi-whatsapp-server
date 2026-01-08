@@ -5,6 +5,7 @@ FROM node:18-slim
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
+    fonts-noto-color-emoji \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -22,8 +23,10 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    ca-certificates \
     --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Définir les variables d'environnement pour Puppeteer
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
@@ -36,15 +39,15 @@ WORKDIR /app
 COPY package*.json ./
 
 # Installer les dépendances
-RUN npm install --production
+RUN npm install --production --legacy-peer-deps
 
 # Copier le code source
 COPY . .
 
-# Créer le répertoire pour les sessions WhatsApp
-RUN mkdir -p /app/whatsapp-session
+# Créer le répertoire pour les sessions WhatsApp (en /tmp pour Railway)
+RUN mkdir -p /tmp/whatsapp-session && chmod 777 /tmp/whatsapp-session
 
-# Exposer le port
+# Exposer le port (Railway utilise $PORT)
 EXPOSE 3001
 
 # Démarrer le serveur

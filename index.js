@@ -15,84 +15,7 @@ let clientReady = false;
 let currentQR = null;
 let client = null;
 let selectedGroupId = null;
-
-// Initialiser le client WhatsApp
-function initClient() {
-  console.log('🚀 Démarrage du serveur WhatsApp FitMoi...\n');
-
-  client = new Client({
-    authStrategy: new LocalAuth({
-      dataPath: './whatsapp-session'
-    }),
-    puppeteer: {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu'
-      ]
-    }
-  });
-
-  client.on('qr', (qr) => {
-    currentQR = qr;
-    console.log('\n📱 QR Code reçu! Scannez-le avec WhatsApp:\n');
-    qrcode.generate(qr, { small: true });
-    console.log('\n⏳ En attente du scan...\n');
-  });
-
-  client.on('ready', async () => {
-    clientReady = true;
-    currentQR = null;
-    console.log('✅ WhatsApp connecté avec succès!\n');
-    
-    // Lister les groupes disponibles
-    const chats = await client.getChats();
-    const groups = chats.filter(chat => chat.isGroup);
-    console.log(`📋 ${groups.length} groupes disponibles:\n`);
-    groups.slice(0, 10).forEach((g, i) => {
-      console.log(`  ${i + 1}. ${g.name} (${g.id._serialized})`);
-    });
-    if (groups.length > 10) {
-      console.log(`  ... et ${groups.length - 10} autres groupes`);
-    }
-    
-    console.log('\n👂 En écoute des messages...\n');
-  });
-
-  client.on('authenticated', () => {
-    console.log('🔐 Authentification réussie!\n');
-  });
-
-  client.on('auth_failure', (msg) => {
-    console.error('❌ Échec authentification:', msg);
-    clientReady = false;
-  });
-
-  client.on('disconnected', (reason) => {
-    console.log('📴 WhatsApp déconnecté:', reason);
-    clientReady = false;
-    currentQR = null;
-    // Reconnecter après un délai
-    setTimeout(() => {
-      console.log('🔄 Tentative de reconnexion...');
-      client.initialize();
-    }, 5000);
-  });
-
-  client.on('message', async (msg) => {
-    if (selectedGroupId && msg.from === selectedGroupId) {
-      console.log(`📩 Message de ${msg.from}: ${msg.body.substring(0, 50)}...`);
-    }
-  });
-
-  client.initialize();
-}
+let initializationError = null;
 
 // Vérifier si l'origine est autorisée
 function isOriginAllowed(origin) {
@@ -135,6 +58,8 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ 
         status: 'ok', 
         connected: clientReady,
+        hasQR: currentQR !== null,
+        error: initializationError,
         timestamp: new Date().toISOString()
       }));
       return;
@@ -146,7 +71,8 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({
         connected: clientReady,
         hasQR: currentQR !== null,
-        selectedGroup: selectedGroupId
+        selectedGroup: selectedGroupId,
+        error: initializationError
       }));
       return;
     }
@@ -241,14 +167,21 @@ const server = http.createServer(async (req, res) => {
           const { groupId } = JSON.parse(body);
           selectedGroupId = groupId;
           
-          const chat = await client.getChatById(groupId);
-          console.log(`✅ Groupe sélectionné: ${chat.name}`);
-          
-          res.writeHead(200);
-          res.end(JSON.stringify({ 
-            success: true, 
-            groupName: chat.name 
-          }));
+          if (clientReady) {
+            const chat = await client.getChatById(groupId);
+            console.log(`✅ Groupe sélectionné: ${chat.name}`);
+            res.writeHead(200);
+            res.end(JSON.stringify({ 
+              success: true, 
+              groupName: chat.name 
+            }));
+          } else {
+            res.writeHead(200);
+            res.end(JSON.stringify({ 
+              success: true, 
+              groupName: 'WhatsApp non connecté' 
+            }));
+          }
         } catch (err) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: err.message }));
@@ -302,9 +235,112 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Démarrer le serveur
+// Initialiser le client WhatsApp
+function initClient() {
+  console.log('🚀 Initialisation du client WhatsApp...\n');
+
+  try {
+    // Déterminer le chemin de Chromium
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+    console.log(`📍 Chromium path: ${executablePath}`);
+
+    client = new Client({
+      authStrategy: new LocalAuth({
+        dataPath: '/tmp/whatsapp-session'
+      }),
+      puppeteer: {
+        headless: true,
+        executablePath: executablePath,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-software-rasterizer'
+        ]
+      }
+    });
+
+    client.on('qr', (qr) => {
+      currentQR = qr;
+      initializationError = null;
+      console.log('\n📱 QR Code reçu! Scannez-le avec WhatsApp:\n');
+      qrcode.generate(qr, { small: true });
+      console.log('\n⏳ En attente du scan...\n');
+    });
+
+    client.on('ready', async () => {
+      clientReady = true;
+      currentQR = null;
+      initializationError = null;
+      console.log('✅ WhatsApp connecté avec succès!\n');
+      
+      try {
+        const chats = await client.getChats();
+        const groups = chats.filter(chat => chat.isGroup);
+        console.log(`📋 ${groups.length} groupes disponibles:\n`);
+        groups.slice(0, 10).forEach((g, i) => {
+          console.log(`  ${i + 1}. ${g.name} (${g.id._serialized})`);
+        });
+        if (groups.length > 10) {
+          console.log(`  ... et ${groups.length - 10} autres groupes`);
+        }
+      } catch (err) {
+        console.log('Erreur listing groupes:', err.message);
+      }
+      
+      console.log('\n👂 En écoute des messages...\n');
+    });
+
+    client.on('authenticated', () => {
+      console.log('🔐 Authentification réussie!\n');
+    });
+
+    client.on('auth_failure', (msg) => {
+      console.error('❌ Échec authentification:', msg);
+      clientReady = false;
+      initializationError = 'Échec authentification: ' + msg;
+    });
+
+    client.on('disconnected', (reason) => {
+      console.log('📴 WhatsApp déconnecté:', reason);
+      clientReady = false;
+      currentQR = null;
+      // Reconnecter après un délai
+      setTimeout(() => {
+        console.log('🔄 Tentative de reconnexion...');
+        client.initialize().catch(err => {
+          console.error('Erreur reconnexion:', err.message);
+        });
+      }, 10000);
+    });
+
+    client.on('message', async (msg) => {
+      if (selectedGroupId && msg.from === selectedGroupId) {
+        console.log(`📩 Message de ${msg.from}: ${msg.body.substring(0, 50)}...`);
+      }
+    });
+
+    console.log('🔄 Démarrage de WhatsApp Web...');
+    client.initialize().catch(err => {
+      console.error('❌ Erreur initialisation WhatsApp:', err.message);
+      initializationError = err.message;
+    });
+
+  } catch (err) {
+    console.error('❌ Erreur création client:', err.message);
+    initializationError = err.message;
+  }
+}
+
+// Démarrer le serveur HTTP d'abord
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n📡 API WhatsApp disponible sur le port ${PORT}`);
+  console.log(`\n📡 Serveur HTTP démarré sur le port ${PORT}`);
   console.log(`   - GET  /health        - Health check`);
   console.log(`   - GET  /status        - État de la connexion`);
   console.log(`   - GET  /qr            - QR code pour connexion`);
@@ -313,5 +349,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`   - POST /select-group  - Sélectionner un groupe`);
   console.log(`   - POST /send-message  - Envoyer un message\n`);
   
-  initClient();
+  // Initialiser WhatsApp après un court délai
+  setTimeout(() => {
+    initClient();
+  }, 2000);
 });
