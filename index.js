@@ -257,30 +257,41 @@ function initClient() {
   console.log('🚀 Initialisation du client WhatsApp...\n');
 
   try {
-    // Déterminer le chemin de Chromium
+    // Déterminer le chemin de Chromium (différent selon l'environnement)
+    const isDocker = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.RAILWAY_ENVIRONMENT;
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
-    console.log(`📍 Chromium path: ${executablePath}`);
+    
+    if (isDocker) {
+      console.log(`📍 Chromium path: ${executablePath}`);
+    } else {
+      console.log(`📍 Utilisation du Chromium intégré de Puppeteer`);
+    }
+
+    const puppeteerConfig = {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-software-rasterizer'
+      ]
+    };
+    
+    // Ajouter le chemin Chromium seulement en environnement Docker/Railway
+    if (isDocker) {
+      puppeteerConfig.executablePath = executablePath;
+    }
 
     client = new Client({
       authStrategy: new LocalAuth({
-        dataPath: '/tmp/whatsapp-session'
+        dataPath: isDocker ? '/tmp/whatsapp-session' : './whatsapp-session'
       }),
-      puppeteer: {
-        headless: true,
-        executablePath: executablePath,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu',
-          '--disable-extensions',
-          '--disable-software-rasterizer'
-        ]
-      }
+      puppeteer: puppeteerConfig
     });
 
     client.on('qr', async (qr) => {
